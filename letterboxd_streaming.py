@@ -14,6 +14,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def setup_driver():
@@ -156,6 +157,29 @@ def scrape_streaming_info(driver, film_url):
         return f"Error: {str(e)}"
 
 
+def scrape_film_worker(film_index, film):
+    """Worker function to scrape a single film's streaming info with its own driver."""
+    driver = setup_driver()
+    if not driver:
+        return {
+            'index': film_index,
+            'title': film['title'],
+            'url': film['url'],
+            'streaming': "Error: Could not create driver"
+        }
+
+    try:
+        streaming_info = scrape_streaming_info(driver, film['url'])
+        return {
+            'index': film_index,
+            'title': film['title'],
+            'url': film['url'],
+            'streaming': streaming_info
+        }
+    finally:
+        driver.quit()
+
+
 def main():
     print("=" * 70)
     print("LETTERBOXD POPULAR FILMS - STREAMING AVAILABILITY")
@@ -181,19 +205,45 @@ def main():
             print(f"Error scraping Letterboxd: {e}")
             return
 
-        # Check streaming for each film
-        for i, film in enumerate(films, 1):
-            print(f"{i}. {film['title']}")
-            print(f"   URL: {film['url']}")
+        # Check streaming for each film using parallel processing (max 3 concurrent)
+        print("Fetching streaming info in parallel (max 3 concurrent requests)...\n")
 
-            # Scrape the streaming info from the film's page
-            streaming_info = scrape_streaming_info(driver, film['url'])
-            print(f"   Streaming: {streaming_info}")
+        results = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(scrape_film_worker, i + 1, film): (i + 1, film)
+                for i, film in enumerate(films)
+            }
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                    # Print results as they arrive
+                    print(f"✓ Completed: {result['title']}")
+                except Exception as e:
+                    film_index, film = futures[future]
+                    print(f"✗ Error fetching {film['title']}: {e}")
+                    results.append({
+                        'index': film_index,
+                        'title': film['title'],
+                        'url': film['url'],
+                        'streaming': f"Error: {str(e)}"
+                    })
+
+        # Sort results by original index and print summary
+        results.sort(key=lambda x: x['index'])
+        print("\n" + "=" * 70)
+        print("RESULTS")
+        print("=" * 70 + "\n")
+
+        for result in results:
+            print(f"{result['index']}. {result['title']}")
+            print(f"   URL: {result['url']}")
+            print(f"   Streaming: {result['streaming']}")
             print()
-
-            # Be nice to Letterboxd servers - add delay between requests
-            if i < len(films):
-                time.sleep(1)
 
         print("=" * 70)
 

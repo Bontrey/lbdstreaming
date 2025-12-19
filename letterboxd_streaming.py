@@ -125,8 +125,8 @@ def scrape_letterboxd_popular(driver):
     return films
 
 
-def scrape_streaming_info(driver, film_url):
-    """Scrape the 'Where to watch' section from a film's Letterboxd page."""
+def scrape_film_info(driver, film_url):
+    """Scrape streaming info and rating from a film's Letterboxd page."""
     try:
         driver.get(film_url)
 
@@ -134,6 +134,30 @@ def scrape_streaming_info(driver, film_url):
         time.sleep(3)
 
         soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # Extract rating from JSON-LD structured data
+        rating = None
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in json_ld_scripts:
+            try:
+                content = script.string if script.string else script.get_text()
+                if content:
+                    # Remove CDATA comments if present
+                    content = content.strip()
+                    if content.startswith('/* <![CDATA['):
+                        content = content.replace('/* <![CDATA[ */', '', 1)
+                        content = content.replace('/* ]]> */', '', 1)
+                    content = content.strip()
+
+                    data = json.loads(content)
+                    if 'aggregateRating' in data:
+                        rating = data['aggregateRating'].get('ratingValue')
+                        break
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                continue
+
+        # Extract streaming info
+        streaming_info = "No streaming info available"
 
         # Look for the div with id="watch"
         watch_div = soup.find('div', id='watch')
@@ -164,7 +188,7 @@ def scrape_streaming_info(driver, film_url):
                         for s in services:
                             if s not in unique_services:
                                 unique_services.append(s)
-                        return ', '.join(unique_services)
+                        streaming_info = ', '.join(unique_services)
             else:
                 # Check if there's any content in the watch div
                 # Sometimes films only have a message like "Watch it now"
@@ -174,17 +198,22 @@ def scrape_streaming_info(driver, film_url):
                     lines = [line.strip() for line in text.split('\n') if line.strip()]
                     filtered_lines = [line for line in lines if line.lower() not in ['where to watch', 'trailer']]
                     if filtered_lines:
-                        return filtered_lines[0][:100]
+                        streaming_info = filtered_lines[0][:100]
 
-        # If no watch div found, return message
-        return "No streaming info available"
+        return {
+            'streaming': streaming_info,
+            'rating': rating
+        }
 
     except Exception as e:
-        return f"Error: {str(e)}"
+        return {
+            'streaming': f"Error: {str(e)}",
+            'rating': None
+        }
 
 
 def scrape_film_worker(film_index, film):
-    """Worker function to scrape a single film's streaming info with its own driver."""
+    """Worker function to scrape a single film's info with its own driver."""
     driver = setup_driver()
     if not driver:
         return {
@@ -192,16 +221,18 @@ def scrape_film_worker(film_index, film):
             'title': film['title'],
             'url': film['url'],
             'streaming': "Error: Could not create driver",
+            'rating': None,
             'cached': False
         }
 
     try:
-        streaming_info = scrape_streaming_info(driver, film['url'])
+        film_info = scrape_film_info(driver, film['url'])
         return {
             'index': film_index,
             'title': film['title'],
             'url': film['url'],
-            'streaming': streaming_info,
+            'streaming': film_info['streaming'],
+            'rating': film_info['rating'],
             'cached': False
         }
     finally:
@@ -244,11 +275,13 @@ def main():
 
         for i, film in enumerate(films):
             if film['url'] in cache:
+                cached_data = cache[film['url']]
                 cached_results.append({
                     'index': i + 1,
                     'title': film['title'],
                     'url': film['url'],
-                    'streaming': cache[film['url']]['streaming'],
+                    'streaming': cached_data.get('streaming', 'No streaming info available'),
+                    'rating': cached_data.get('rating'),
                     'cached': True
                 })
                 print(f"⚡ Cached: {film['title']}")
@@ -284,7 +317,8 @@ def main():
                         if should_cache:
                             cache[result['url']] = {
                                 'title': result['title'],
-                                'streaming': result['streaming']
+                                'streaming': result['streaming'],
+                                'rating': result['rating']
                             }
                             save_cache(cache)
                             print(f"✓ Fetched & Cached: {result['title']}")
@@ -298,6 +332,7 @@ def main():
                             'title': film['title'],
                             'url': film['url'],
                             'streaming': f"Error: {str(e)}",
+                            'rating': None,
                             'cached': False
                         })
 
@@ -322,13 +357,21 @@ def main():
             if streaming.startswith('Not streaming'):
                 streaming = 'Not streaming'
 
+            # Format rating
+            rating = result.get('rating')
+            if rating is not None:
+                rating_str = f"{rating:.1f}"
+            else:
+                rating_str = "N/A"
+
             table_data.append([
                 result['title'][:40] + '...' if len(result['title']) > 40 else result['title'],
+                rating_str,
                 streaming[:50] + '...' if len(streaming) > 50 else streaming
             ])
 
         # Print table with headers
-        headers = ["Film", "Streaming Availability"]
+        headers = ["Film", "Rating", "Streaming Availability"]
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
         print("\n" + "=" * 100)
 

@@ -50,3 +50,6 @@ chromedriver.log
 
 # Logs
 *.log
+
+# Cache files
+streaming_cache.json

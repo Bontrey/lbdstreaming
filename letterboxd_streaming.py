@@ -14,7 +14,32 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 import time
+import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Cache file to store streaming info
+CACHE_FILE = 'streaming_cache.json'
+
+
+def load_cache():
+    """Load cached streaming info from file."""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_cache(cache):
+    """Save streaming info cache to file."""
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(cache, f, indent=2)
+    except IOError as e:
+        print(f"Warning: Could not save cache: {e}")
 
 
 def setup_driver():
@@ -157,15 +182,26 @@ def scrape_streaming_info(driver, film_url):
         return f"Error: {str(e)}"
 
 
-def scrape_film_worker(film_index, film):
+def scrape_film_worker(film_index, film, cache):
     """Worker function to scrape a single film's streaming info with its own driver."""
+    # Check cache first
+    if film['url'] in cache:
+        return {
+            'index': film_index,
+            'title': film['title'],
+            'url': film['url'],
+            'streaming': cache[film['url']]['streaming'],
+            'cached': True
+        }
+
     driver = setup_driver()
     if not driver:
         return {
             'index': film_index,
             'title': film['title'],
             'url': film['url'],
-            'streaming': "Error: Could not create driver"
+            'streaming': "Error: Could not create driver",
+            'cached': False
         }
 
     try:
@@ -174,7 +210,8 @@ def scrape_film_worker(film_index, film):
             'index': film_index,
             'title': film['title'],
             'url': film['url'],
-            'streaming': streaming_info
+            'streaming': streaming_info,
+            'cached': False
         }
     finally:
         driver.quit()
@@ -185,6 +222,11 @@ def main():
     print("LETTERBOXD POPULAR FILMS - STREAMING AVAILABILITY")
     print("=" * 70)
     print()
+
+    # Load cache
+    cache = load_cache()
+    cache_size = len(cache)
+    print(f"Loaded cache with {cache_size} film(s)\n")
 
     # Set up the Selenium driver
     driver = setup_driver()
@@ -206,13 +248,13 @@ def main():
             return
 
         # Check streaming for each film using parallel processing (max 3 concurrent)
-        print("Fetching streaming info in parallel (max 3 concurrent requests)...\n")
+        print("Fetching streaming info (checking cache first, max 3 concurrent requests)...\n")
 
         results = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             # Submit all tasks
             futures = {
-                executor.submit(scrape_film_worker, i + 1, film): (i + 1, film)
+                executor.submit(scrape_film_worker, i + 1, film, cache): (i + 1, film)
                 for i, film in enumerate(films)
             }
 
@@ -221,8 +263,28 @@ def main():
                 try:
                     result = future.result()
                     results.append(result)
-                    # Print results as they arrive
-                    print(f"✓ Completed: {result['title']}")
+
+                    # Update cache if this was a new fetch and has valid streaming info
+                    if not result.get('cached', False):
+                        streaming = result['streaming']
+                        # Only cache if we found actual streaming services (not errors or "no info")
+                        should_cache = (
+                            streaming and
+                            not streaming.startswith('Not streaming') and
+                            not streaming.startswith('Error:')
+                        )
+
+                        if should_cache:
+                            cache[result['url']] = {
+                                'title': result['title'],
+                                'streaming': result['streaming']
+                            }
+                            save_cache(cache)
+                            print(f"✓ Fetched & Cached: {result['title']}")
+                        else:
+                            print(f"✓ Fetched (not cached): {result['title']}")
+                    else:
+                        print(f"⚡ Cached: {result['title']}")
                 except Exception as e:
                     film_index, film = futures[future]
                     print(f"✗ Error fetching {film['title']}: {e}")
@@ -230,7 +292,8 @@ def main():
                         'index': film_index,
                         'title': film['title'],
                         'url': film['url'],
-                        'streaming': f"Error: {str(e)}"
+                        'streaming': f"Error: {str(e)}",
+                        'cached': False
                     })
 
         # Sort results by original index and print summary
@@ -239,8 +302,13 @@ def main():
         print("RESULTS")
         print("=" * 70 + "\n")
 
+        cached_count = sum(1 for r in results if r.get('cached', False))
+        fetched_count = len(results) - cached_count
+        print(f"Summary: {cached_count} from cache, {fetched_count} newly fetched\n")
+
         for result in results:
-            print(f"{result['index']}. {result['title']}")
+            cached_indicator = " [CACHED]" if result.get('cached', False) else ""
+            print(f"{result['index']}. {result['title']}{cached_indicator}")
             print(f"   URL: {result['url']}")
             print(f"   Streaming: {result['streaming']}")
             print()

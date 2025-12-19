@@ -183,18 +183,8 @@ def scrape_streaming_info(driver, film_url):
         return f"Error: {str(e)}"
 
 
-def scrape_film_worker(film_index, film, cache):
+def scrape_film_worker(film_index, film):
     """Worker function to scrape a single film's streaming info with its own driver."""
-    # Check cache first
-    if film['url'] in cache:
-        return {
-            'index': film_index,
-            'title': film['title'],
-            'url': film['url'],
-            'streaming': cache[film['url']]['streaming'],
-            'cached': True
-        }
-
     driver = setup_driver()
     if not driver:
         return {
@@ -248,25 +238,41 @@ def main():
             print(f"Error scraping Letterboxd: {e}")
             return
 
-        # Check streaming for each film using parallel processing (max 3 concurrent)
-        print("Fetching streaming info (checking cache first, max 3 concurrent requests)...\n")
+        # Separate cached and non-cached films
+        cached_results = []
+        films_to_fetch = []
 
-        results = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            # Submit all tasks
-            futures = {
-                executor.submit(scrape_film_worker, i + 1, film, cache): (i + 1, film)
-                for i, film in enumerate(films)
-            }
+        for i, film in enumerate(films):
+            if film['url'] in cache:
+                cached_results.append({
+                    'index': i + 1,
+                    'title': film['title'],
+                    'url': film['url'],
+                    'streaming': cache[film['url']]['streaming'],
+                    'cached': True
+                })
+                print(f"⚡ Cached: {film['title']}")
+            else:
+                films_to_fetch.append((i + 1, film))
 
-            # Collect results as they complete
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
+        print(f"\nFetching {len(films_to_fetch)} film(s) with max 3 concurrent requests...\n")
 
-                    # Update cache if this was a new fetch and has valid streaming info
-                    if not result.get('cached', False):
+        # Fetch non-cached films in parallel
+        fetched_results = []
+        if films_to_fetch:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                # Submit only non-cached films
+                futures = {
+                    executor.submit(scrape_film_worker, film_index, film): (film_index, film)
+                    for film_index, film in films_to_fetch
+                }
+
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        fetched_results.append(result)
+
                         streaming = result['streaming']
                         # Only cache if we found actual streaming services (not errors or "no info")
                         should_cache = (
@@ -284,18 +290,19 @@ def main():
                             print(f"✓ Fetched & Cached: {result['title']}")
                         else:
                             print(f"✓ Fetched (not cached): {result['title']}")
-                    else:
-                        print(f"⚡ Cached: {result['title']}")
-                except Exception as e:
-                    film_index, film = futures[future]
-                    print(f"✗ Error fetching {film['title']}: {e}")
-                    results.append({
-                        'index': film_index,
-                        'title': film['title'],
-                        'url': film['url'],
-                        'streaming': f"Error: {str(e)}",
-                        'cached': False
-                    })
+                    except Exception as e:
+                        film_index, film = futures[future]
+                        print(f"✗ Error fetching {film['title']}: {e}")
+                        fetched_results.append({
+                            'index': film_index,
+                            'title': film['title'],
+                            'url': film['url'],
+                            'streaming': f"Error: {str(e)}",
+                            'cached': False
+                        })
+
+        # Combine cached and fetched results
+        results = cached_results + fetched_results
 
         # Sort results by original index and print summary
         results.sort(key=lambda x: x['index'])

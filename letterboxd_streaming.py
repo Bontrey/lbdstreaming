@@ -13,6 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
+from tabulate import tabulate
 import time
 import json
 import os
@@ -104,7 +105,7 @@ def scrape_letterboxd_popular(driver):
                 # Get title from img alt
                 img = container.find('img')
                 if img and img.get('alt'):
-                    title = img['alt']
+                    title = img['alt'].replace('Poster for ', '')
                 else:
                     title = film_slug.replace('-', ' ').title()
             else:
@@ -112,7 +113,7 @@ def scrape_letterboxd_popular(driver):
         else:
             film_slug = poster_div.get('data-film-slug')
             img = poster_div.find('img')
-            title = img.get('alt', film_slug.replace('-', ' ').title()) if img else film_slug.replace('-', ' ').title()
+            title = img.get('alt', film_slug.replace('-', ' ').title()).replace('Poster for ', '') if img else film_slug.replace('-', ' ').title()
 
         if film_slug:
             film_url = f"https://letterboxd.com/film/{film_slug}/"
@@ -298,22 +299,31 @@ def main():
 
         # Sort results by original index and print summary
         results.sort(key=lambda x: x['index'])
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 100)
         print("RESULTS")
-        print("=" * 70 + "\n")
+        print("=" * 100 + "\n")
 
         cached_count = sum(1 for r in results if r.get('cached', False))
         fetched_count = len(results) - cached_count
         print(f"Summary: {cached_count} from cache, {fetched_count} newly fetched\n")
 
+        # Create table data
+        table_data = []
         for result in results:
-            cached_indicator = " [CACHED]" if result.get('cached', False) else ""
-            print(f"{result['index']}. {result['title']}{cached_indicator}")
-            print(f"   URL: {result['url']}")
-            print(f"   Streaming: {result['streaming']}")
-            print()
+            # Clean up streaming info
+            streaming = result['streaming']
+            if streaming.startswith('Not streaming'):
+                streaming = 'Not streaming'
 
-        print("=" * 70)
+            table_data.append([
+                result['title'][:40] + '...' if len(result['title']) > 40 else result['title'],
+                streaming[:50] + '...' if len(streaming) > 50 else streaming
+            ])
+
+        # Print table with headers
+        headers = ["Film", "Streaming Availability"]
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+        print("\n" + "=" * 100)
 
     finally:
         # Clean up
